@@ -19,9 +19,47 @@
  *
  */
 
-/* Overdues Report */
-// By Erwan Setyo Budi
-// Feature : Add Button to Sent Overdue Email Notification All and Whatsapp Button
+/* 
+ * Overdues Report Module (Laporan Keterlambatan Pengembalian Buku)
+ * ---------------------------------------------------------------
+ * Author: Erwan Setyo Budi
+ * 
+ * Deskripsi Fitur:
+ * 1. Menampilkan daftar anggota perpustakaan yang memiliki pinjaman buku
+ *    dengan status terlambat dikembalikan (overdue), lengkap dengan detail buku.
+ * 
+ * 2. Filter Laporan:
+ *    - Pencarian berdasarkan Member ID atau Nama Anggota.
+ *    - Filter berdasarkan rentang tanggal peminjaman (Loan Date From – Until).
+ *    - Pengaturan jumlah data per halaman (20–200 data).
+ * 
+ * 3. Informasi Anggota:
+ *    - Menampilkan nama anggota, alamat email, alamat surat, dan nomor telepon/HP.
+ *    - Menampilkan jumlah hari keterlambatan dan total denda yang dikenakan.
+ *    - Menampilkan lokasi koleksi (location name) jika tersedia.
+ * 
+ * 4. Tombol Notifikasi Email:
+ *    - Tombol untuk mengirim notifikasi email secara individual ke anggota.
+ *    - Tombol “Kirim Semua Notifikasi Email” untuk mengirim ke seluruh anggota yang terlambat.
+ * 
+ * 5. Tombol Notifikasi WhatsApp:
+ *    - Tombol “Kirim Notifikasi WA” untuk membuka chat WhatsApp ke anggota dengan pesan otomatis.
+ *    - Nomor HP di-normalisasi ke format internasional Indonesia (+62) agar kompatibel dengan wa.me.
+ *    - Mendukung berbagai format input nomor (0821-xxxx, 0858 xxxx, +62 xxxxx, dst.).
+ * 
+ * 6. Perhitungan Denda:
+ *    - Menghitung jumlah hari keterlambatan berdasarkan aturan grace period di modul sirkulasi.
+ *    - Menghitung nominal denda harian berdasarkan tipe anggota atau aturan peminjaman.
+ * 
+ * 7. Tampilan Laporan:
+ *    - Menampilkan data dalam bentuk tabel dengan pagination.
+ *    - Menyertakan detail buku (judul, harga, lokasi) dan informasi pinjaman (tanggal pinjam, tanggal jatuh tempo).
+ * 
+ * Catatan Teknis:
+ * - Menggunakan class `report_datagrid` untuk membuat tabel laporan.
+ * - Menggunakan AJAX untuk pengiriman email tanpa reload halaman.
+ * - Menggunakan `normalize_phone_id()` untuk memastikan format nomor WA konsisten.
+ */
 
 
 // key to authenticate
@@ -170,6 +208,42 @@ if (!$reportView) {
     $reportgrid->table_header_attr = 'class="dataListHeaderPrinted"';
     $reportgrid->column_width = array('1' => '80%');
 
+    
+    /**
+     * Normalisasi nomor HP Indonesia -> 62xxxxxxxxxx
+     * Menerima input: 0821-9580-3039, 0858 4933 9348, +62 877 8077 4181, 6281299..., dst.
+     * Menghasilkan hanya digit, diawali 62. Jika kosong/invalid -> return null.
+     */
+    function normalize_phone_id($phone)
+    {
+        // buang semua non-digit
+        $digits = preg_replace('/\D+/', '', (string)$phone);
+
+        if ($digits === '' || $digits === null) {
+            return null;
+        }
+
+        // perbaiki kasus "620812..." (orang nulis +6208...)
+        $digits = preg_replace('/^620+/', '62', $digits);
+
+        if (strpos($digits, '62') === 0) {
+            return $digits; // sudah OK
+        }
+
+        // 08xxxxxxxxxx -> 62xxxxxxxxxx
+        if ($digits[0] === '0') {
+            return '62' . substr($digits, 1);
+        }
+
+        // 8xxxxxxxxxx -> 62xxxxxxxxxx (kadang user ngetik tanpa 0)
+        if ($digits[0] === '8') {
+            return '62' . $digits;
+        }
+
+        // fallback: apa pun yang belum ada kode negara, tambahkan 62
+        return '62' . $digits;
+    }
+
     // callback function to show overdued list
     function showOverduedList($obj_db, $array_data)
     {
@@ -182,12 +256,17 @@ if (!$reportView) {
 
         // member name
         $member_q = $obj_db->query('SELECT m.member_name, m.member_email, m.member_phone, m.member_mail_address, mmt.fine_each_day 
-                                           FROM member m 
-                                           LEFT JOIN mst_member_type mmt on m.member_type_id = mmt.member_type_id
-                                           WHERE m.member_id=\'' . $array_data[0] . '\'');
+                                   FROM member m 
+                                   LEFT JOIN mst_member_type mmt on m.member_type_id = mmt.member_type_id
+                                   WHERE m.member_id=\'' . $array_data[0] . '\'');
         $member_d = $member_q->fetch_row();
+
         $member_name = $member_d[0];
         $member_mail_address = $member_d[3];
+
+        // Normalisasi nomor WA sekali di awal
+        $waNumber = normalize_phone_id($member_d[2]);
+
         unset($member_q);
 
         $ovd_title_q = $obj_db->query('SELECT l.loan_id, l.item_code, i.price, i.price_currency,
@@ -232,9 +311,22 @@ if (!$reportView) {
             $_buffer .= '<td width="20%"><div>' . __('Overdue') . ': ' . $overdue_days . ' ' . __('day(s)') . '</div><div>'.__('Fines').': '.$fines.'</div></td>';
             $_buffer .= '<td width="30%">' . __('Loan Date') . ': ' . $ovd_title_d['loan_date'] . ' &nbsp; ' . __('Due Date') . ': ' . $ovd_title_d['due_date'] . '</td>';
             // Add by Erwan Setyo Budi
-            $_buffer .= '<td width="20%"><p>Kirim Notifikasi WA <a class="btn btn-sm btn-outline-primary" href="https://wa.me/'.$member_d[2].'?text=Pemberitahuan bahwa *'.$member_d[0].',* ada pinjaman buku dengan keterlambatan *' . $overdue_days . '  hari* di Perpustakaan dengan Kode Barcode: *'.$ovd_title_d['item_code'].'*, Judul: *' . $ovd_title_d['title'] . '*.  Tanggal harus kembali : ' . $ovd_title_d['due_date'] . '. '.__('Fines').': '.$fines.' .Terima Kasih. '.$sysconf['library_name'].'-'.$sysconf['library_subname'].'" target="_blank"> <i class="fa fa-paper-plane-o"> '.$member_d[2].''.$ovd_title_d[3].'</a></p></td>';
+            // simpan nilai integer-nya dulu sebelum diformat untuk tampilan
+            $overdue_days_int = (int)$overdue_days; // sudah dipastikan numeric di atas
+
+            $message = "Pemberitahuan bahwa *{$member_d[0]},* ada pinjaman buku dengan keterlambatan *{$overdue_days_int} hari* di Perpustakaan dengan Kode Barcode: *{$ovd_title_d['item_code']}*, Judul: *{$ovd_title_d['title']}*. Tanggal harus kembali : {$ovd_title_d['due_date']}. " . __('Fines') . ": {$fines}. Terima Kasih. {$sysconf['library_name']}-{$sysconf['library_subname']}";
+            $waLink  = $waNumber ? ("https://wa.me/{$waNumber}?text=" . rawurlencode($message)) : '#';
+            $waLabel = $waNumber ? $waNumber : __('No phone number');
+
+            $_buffer .= '<td width="20%"><p>Kirim Notifikasi WA ';
+            $_buffer .= '<a class="btn btn-sm btn-outline-primary'.($waNumber ? '' : ' disabled').'" href="'.$waLink.'" target="_blank">';
+            $_buffer .= '<i class="fa fa-paper-plane-o"></i> '.$waLabel.'</a></p></td>';
             $_buffer .= '</tr>';
         }
+        if ($waNumber) {
+            $_buffer .= '<div style="color: black; font-size: 10pt; margin-bottom: 3px;">WhatsApp: '.$waNumber.'</div>';
+        }
+
         $_buffer .= '</table>';
         return $_buffer;
     }
